@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>霓虹弹珠台</title>
+<style>
+  * {
+    margin: 0; padding: 0; box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+    -webkit-user-select: none; user-select: none;
+  }
+  html, body {
+    height: 100%;
+    background: radial-gradient(circle at 50% 40%, #12122a 0%, #05050c 70%);
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    touch-action: none; overscroll-behavior: none;
+  }
+  #wrap { position: relative; }
+  canvas {
+    display: block; border-radius: 16px; outline: none;
+    -webkit-tap-highlight-color: transparent;
+    box-shadow: 0 0 50px rgba(90, 90, 255, 0.28), 0 0 110px rgba(255, 60, 130, 0.14), inset 0 0 0 1px rgba(120,120,255,0.15);
+    cursor: pointer;
+  }
+  #hud {
+    position: absolute; top: 0; left: 0; right: 0;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding: 10px 22px; pointer-events: none;
+    font-size: 12px; letter-spacing: 2px; color: #7a7ab8; text-transform: uppercase;
+  }
+  #hud b {
+    display: block; margin-top: 2px; font-size: 24px; font-weight: 800;
+    color: #fff; text-shadow: 0 0 14px rgba(120, 120, 255, 1);
+    font-variant-numeric: tabular-nums; line-height: 1;
+  }
+  #hud .left-group { display: flex; gap: 22px; }
+  #hud .high b {
+    font-size: 20px; color: #ffd166;
+    text-shadow: 0 0 14px rgba(255, 209, 102, 0.9);
+  }
+  #hud .right { text-align: right; }
+  #hud .right b { text-shadow: 0 0 14px rgba(255, 80, 160, 1); }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game"></canvas>
+  <div id="hud">
+    <div class="left-group">
+      <div>分数<b id="scoreEl">0</b></div>
+      <div class="high">最高<b id="highEl">0</b></div>
+    </div>
+    <div class="right">球数<b id="ballsEl">5</b></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  const W = 440, H = 720;
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('scoreEl');
+  const highEl = document.getElementById('highEl');
+  const ballsEl = document.getElementById('ballsEl');
+
+  function resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const availW = window.innerWidth - 16, availH = window.innerHeight - 16;
+    const scale = Math.min(availW / W, availH / H);
+    const cssW = W * scale, cssH = H * scale;
+    canvas.style.width = cssW + 'px'; canvas.style.height = cssH + 'px';
+    canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr);
+    ctx.setTransform(cssW * dpr / W, 0, 0, cssH * dpr / H, 0, 0);
+  }
+  window.addEventListener('resize', resize);
+
+  // ============ 物理常量 ============
+  const GRAVITY = 950;
+  const MAX_SPEED = 2400;
+  const BALL_R = 9;
+  const DT = 1 / 240;
+  const LAUNCH_SPEED = 2000;
+
+  const ARC_CX = 220, ARC_CY = 240, ARC_R = 200;
+
+  // ============ 墙壁 ============
+  const walls = [];
+  walls.push([20, 240, 20, 580]);
+  walls.push([20, 580, 105, 650]);
+  for (let i = 0; i < 64; i++) {
+    const a1 = Math.PI + (i / 64) * Math.PI;
+    const a2 = Math.PI + ((i + 1) / 64) * Math.PI;
+    walls.push([
+      ARC_CX + Math.cos(a1) * ARC_R, ARC_CY + Math.sin(a1) * ARC_R,
+      ARC_CX + Math.cos(a2) * ARC_R, ARC_CY + Math.sin(a2) * ARC_R
+    ]);
+  }
+  walls.push([420, 240, 420, 700]);
+  walls.push([388, 175, 388, 700]);
+  walls.push([388, 700, 420, 700]);
+  walls.push([388, 580, 315, 650]);
+
+  // ============ 游戏对象 ============
+  const ball = { x: 404, y: 688, vx: 0, vy: 0, stuck: true, trail: [] };
+
+  const leftFlipper = {
+    x: 115, y: 655, len: 85, r: 8,
+    restAngle: 0.49, upAngle: -0.56, angle: 0.49, prevAngle: 0.49, omega: 0,
+    speed: 13, pressed: false
+  };
+  const rightFlipper = {
+    x: 305, y: 655, len: 85, r: 8,
+    restAngle: Math.PI - 0.49, upAngle: Math.PI + 0.56, angle: Math.PI - 0.49, prevAngle: Math.PI - 0.49, omega: 0,
+    speed: 13, pressed: false
+  };
+
+  const bumpers = [
+    { x: 140, y: 320, r: 22, score: 100, flash: 0 },
+    { x: 280, y: 320, r: 22, score: 100, flash: 0 },
+    { x: 210, y: 430, r: 22, score: 100, flash: 0 }
+  ];
+
+  const pegs = [
+    { x: 70,  y: 220, r: 7, flash: 0 }, { x: 350, y: 220, r: 7, flash: 0 },
+    { x: 180, y: 170, r: 7, flash: 0 }, { x: 260, y: 170, r: 7, flash: 0 },
+    { x: 50,  y: 400, r: 7, flash: 0 }, { x: 370, y: 400, r: 7, flash: 0 },
+    { x: 140, y: 530, r: 7, flash: 0 }, { x: 280, y: 530, r: 7, flash: 0 },
+    { x: 220, y: 610, r: 10, flash: 0 }
+  ];
+
+  // ============ 状态 ============
+  let score = 0, displayScore = 0, lives = 5, gameOver = false;
+  let shake = 0, flashScreen = 0, stuckTimer = 0;
+  // 用于判断球是否已经离开过发射器（防止发射瞬间被立刻判定回仓）
+  let hasLeftLauncher = false;
+
+  // 最高分
+  let highScore = 0;
+  try { highScore = parseInt(localStorage.getItem('pinball_highscore') || '0', 10) || 0; } catch (e) { highScore = 0; }
+  let highSaveTimer = null;
+
+  // 轨迹预测
+  let trajectoryEnabled = false;
+  let trajectoryPoints = [];
+  let trajectoryFrameCounter = 0;
+  const TRAJECTORY_UPDATE_INTERVAL = 8;
+  const SIM_DT = 1 / 240;
+  const MAX_SIM_STEPS = 2400;
+
+  // 秘密点击序列
+  let clickSequence = [];
+
+  // ============ 工具 ============
+  function addScore(n) {
+    score += n;
+    if (score > highScore) {
+      highScore = score;
+      if (highSaveTimer) clearTimeout(highSaveTimer);
+      highSaveTimer = setTimeout(() => {
+        try { localStorage.setItem('pinball_highscore', String(highScore)); } catch (e) {}
+      }, 400);
+    }
+  }
+
+  function launch() {
+    if (!ball.stuck || gameOver) return;
+    ball.stuck = false;
+    ball.vx = (Math.random() - 0.5) * 40;
+    ball.vy = -LAUNCH_SPEED;
+    ball.trail.length = 0;
+    stuckTimer = 0;
+    hasLeftLauncher = false;
+    trajectoryPoints = [];
+  }
+
+  function resetBall() {
+    ball.x = 404; ball.y = 688; ball.vx = 0; ball.vy = 0;
+    ball.stuck = true; ball.trail.length = 0;
+    stuckTimer = 0;
+    hasLeftLauncher = false;
+    trajectoryPoints = [];
+  }
+
+  function newGame() {
+    score = 0; displayScore = 0; lives = 5; gameOver = false;
+    shake = 0; flashScreen = 0; stuckTimer = 0;
+    hasLeftLauncher = false;
+    clickSequence = [];
+    trajectoryPoints = [];
+    resetBall();
+    leftFlipper.pressed = false; rightFlipper.pressed = false;
+    for (const b of bumpers) b.flash = 0;
+    for (const p of pegs) p.flash = 0;
+    updateHUD();
+  }
+
+  function updateHUD() {
+    scoreEl.textContent = Math.floor(displayScore);
+    highEl.textContent = Math.floor(highScore);
+    ballsEl.textContent = Math.max(0, lives);
+  }
+
+  // ============ 碰撞（可复用于模拟） ============
+  function collideSegmentB(b, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1, lenSq = dx * dx + dy * dy;
+    let t = 0;
+    if (lenSq > 1e-9) {
+      t = ((b.x - x1) * dx + (b.y - y1) * dy) / lenSq;
+      if (t < 0) t = 0; else if (t > 1) t = 1;
+    }
+    const cx = x1 + t * dx, cy = y1 + t * dy;
+    let nx = b.x - cx, ny = b.y - cy;
+    const d2 = nx * nx + ny * ny;
+    if (d2 >= BALL_R * BALL_R) return;
+
+    let d = Math.sqrt(d2);
+    if (d < 1e-6) { nx = 0; ny = -1; d = 1; }
+    else { nx /= d; ny /= d; }
+
+    b.x = cx + nx * BALL_R;
+    b.y = cy + ny * BALL_R;
+    const vn = b.vx * nx + b.vy * ny;
+    if (vn < 0) {
+      b.vx -= (1 + 0.42) * vn * nx;
+      b.vy -= (1 + 0.42) * vn * ny;
+    }
+  }
+
+  function collideCircleB(b, cx, cy, cr, restitution, boost) {
+    let nx = b.x - cx, ny = b.y - cy;
+    const minD = cr + BALL_R, d2 = nx * nx + ny * ny;
+    if (d2 >= minD * minD) return false;
+
+    let d = Math.sqrt(d2);
+    if (d < 1e-6) { nx = 0; ny = -1; d = 1; }
+    else { nx /= d; ny /= d; }
+
+    b.x = cx + nx * minD;
+    b.y = cy + ny * minD;
+    const vn = b.vx * nx + b.vy * ny;
+    if (vn < 0) {
+      b.vx -= (1 + restitution) * vn * nx;
+      b.vy -= (1 + restitution) * vn * ny;
+    }
+    if (boost) {
+      const sp = Math.hypot(b.vx, b.vy) || 1;
+      const target = Math.max(sp, 760);
+      b.vx = b.vx / sp * target;
+      b.vy = b.vy / sp * target;
+    }
+    return true;
+  }
+
+  function collideFlipperB(b, f) {
+    const cosA = Math.cos(f.angle), sinA = Math.sin(f.angle);
+    const tipX = f.x + cosA * f.len, tipY = f.y + sinA * f.len;
+    const dx = tipX - f.x, dy = tipY - f.y, lenSq = dx * dx + dy * dy;
+    let t = ((b.x - f.x) * dx + (b.y - f.y) * dy) / lenSq;
+    if (t < 0) t = 0; else if (t > 1) t = 1;
+
+    const cx = f.x + t * dx, cy = f.y + t * dy;
+    let nx = b.x - cx, ny = b.y - cy;
+    const minD = BALL_R + f.r, d2 = nx * nx + ny * ny;
+    if (d2 >= minD * minD) return;
+
+    let d = Math.sqrt(d2);
+    if (d < 1e-6) { nx = 0; ny = -1; d = 1; }
+    else { nx /= d; ny /= d; }
+
+    b.x = cx + nx * minD;
+    b.y = cy + ny * minD;
+    const rx = cx - f.x, ry = cy - f.y;
+    const svx = -f.omega * ry, svy = f.omega * rx;
+    const rvx = b.vx - svx, rvy = b.vy - svy;
+    const vn = rvx * nx + rvy * ny;
+
+    if (vn < 0) {
+      b.vx = rvx - (1 + 0.45) * vn * nx + svx;
+      b.vy = rvy - (1 + 0.45) * vn * ny + svy;
+    }
+  }
+
+  // ============ 单步物理（可复用于轨迹模拟） ============
+  function stepBall(b, dt, isSim) {
+    b.vy += GRAVITY * dt;
+    const sp = Math.hypot(b.vx, b.vy);
+    if (sp > MAX_SPEED) { b.vx *= MAX_SPEED / sp; b.vy *= MAX_SPEED / sp; }
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+
+    for (let i = 0; i < walls.length; i++) {
+      const w = walls[i];
+      collideSegmentB(b, w[0], w[1], w[2], w[3]);
+    }
+
+    for (let i = 0; i < bumpers.length; i++) {
+      const bm = bumpers[i];
+      if (collideCircleB(b, bm.x, bm.y, bm.r, 0.55, true)) {
+        if (!isSim) {
+          bm.flash = 1;
+          addScore(bm.score);
+          shake = Math.min(shake + 3, 10);
+        }
+      }
+    }
+
+    for (let i = 0; i < pegs.length; i++) {
+      const p = pegs[i];
+      if (collideCircleB(b, p.x, p.y, p.r, 0.65, false)) {
+        if (!isSim) {
+          p.flash = 1;
+          addScore(10);
+        }
+      }
+    }
+
+    collideFlipperB(b, leftFlipper);
+    collideFlipperB(b, rightFlipper);
+  }
+
+  // ============ 挡板 ============
+  function updateFlippers(dt) {
+    const list = [leftFlipper, rightFlipper];
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i];
+      f.prevAngle = f.angle;
+      const target = f.pressed ? f.upAngle : f.restAngle;
+      const maxDelta = f.speed * dt, diff = target - f.angle;
+      if (Math.abs(diff) <= maxDelta) f.angle = target;
+      else f.angle += Math.sign(diff) * maxDelta;
+      f.omega = (f.angle - f.prevAngle) / dt;
+    }
+  }
+
+  // ============ 轨迹预测 ============
+  function computeTrajectory() {
+    if (ball.stuck || gameOver) return [];
+    const sim = { x: ball.x, y: ball.y, vx: ball.vx, vy: ball.vy };
+    const pts = [{ x: sim.x, y: sim.y }];
+    for (let i = 0; i < MAX_SIM_STEPS; i++) {
+      stepBall(sim, SIM_DT, true);
+      pts.push({ x: sim.x, y: sim.y });
+      if (sim.y > H + 40) break;
+    }
+    return pts;
+  }
+
+  // ============ 主物理 ============
+  function physics(dt) {
+    if (gameOver) return;
+    updateFlippers(dt);
+
+    for (const b of bumpers) b.flash *= 0.86;
+    for (const p of pegs) p.flash *= 0.86;
+
+    if (ball.stuck) {
+      ball.x = 404; ball.y = 688; ball.vx = 0; ball.vy = 0;
+      return;
+    }
+
+    stepBall(ball, dt, false);
+
+    // 球已离开发射器（上升进入游戏区）
+    if (!hasLeftLauncher && ball.y < 400) {
+      hasLeftLauncher = true;
+    }
+
+    // 球重新滑回发射通道底部 -> 进入待发射状态，不扣命
+    if (hasLeftLauncher && ball.x > 390 && ball.y > 655) {
+      ball.stuck = true;
+      ball.x = 404;
+      ball.y = 688;
+      ball.vx = 0;
+      ball.vy = 0;
+      ball.trail.length = 0;
+      hasLeftLauncher = false;
+      stuckTimer = 0;
+      trajectoryPoints = [];
+      return;
+    }
+
+    // 防卡死
+    if (ball.y > 580 && Math.hypot(ball.vx, ball.vy) < 30) {
+      stuckTimer += dt;
+      if (stuckTimer > 1.0) {
+        ball.vx += (Math.random() - 0.5) * 200;
+        ball.vy -= 280;
+        stuckTimer = 0;
+      }
+    } else {
+      stuckTimer = 0;
+    }
+
+    // 掉球（只有从下方出去才算失败）
+    if (ball.y > H + 40) {
+      lives--; flashScreen = 1;
+      if (lives <= 0) {
+        lives = 0; gameOver = true; ball.stuck = true;
+        ball.trail.length = 0;
+        if (score > highScore) {
+          highScore = score;
+          try { localStorage.setItem('pinball_highscore', String(highScore)); } catch (e) {}
+        }
+        updateHUD();
+      } else {
+        resetBall();
+        updateHUD();
+      }
+    }
+  }
+
+  // ============ 绘制 ============
+  function drawWalls() {
+    ctx.save(); ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    ctx.shadowColor = '#4d4dff'; ctx.shadowBlur = 16; ctx.strokeStyle = '#23234d'; ctx.lineWidth = 9;
+    ctx.beginPath();
+    for (const w of walls) { ctx.moveTo(w[0], w[1]); ctx.lineTo(w[2], w[3]); }
+    ctx.stroke();
+
+    ctx.shadowBlur = 6; ctx.shadowColor = '#7a7aff'; ctx.strokeStyle = '#5b5bff'; ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    for (const w of walls) { ctx.moveTo(w[0], w[1]); ctx.lineTo(w[2], w[3]); }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawBumpers() {
+    for (let i = 0; i < bumpers.length; i++) {
+      const b = bumpers[i];
+      const f = b.flash;
+      ctx.save();
+      ctx.shadowColor = f > 0.1 ? '#ff6ba8' : '#ff2d6f';
+      ctx.shadowBlur = 16 + f * 24;
+
+      const g = ctx.createRadialGradient(b.x - b.r * 0.3, b.y - b.r * 0.3, b.r * 0.1, b.x, b.y, b.r);
+      g.addColorStop(0, f > 0.1 ? '#ffffff' : '#ffc2da');
+      g.addColorStop(0.6, '#ff2d6f');
+      g.addColorStop(1, '#8a1038');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+
+      ctx.strokeStyle = 'rgba(255,255,255,' + (0.35 + f * 0.6) + ')';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r * 0.5, 0, Math.PI * 2); ctx.stroke();
+    }
+  }
+
+  function drawPegs() {
+    for (const p of pegs) {
+      const f = p.flash;
+      ctx.save();
+      ctx.shadowColor = '#4be1ff'; ctx.shadowBlur = 10 + f * 20;
+      ctx.fillStyle = f > 0.1 ? '#ffffff' : '#4be1ff';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+  }
+
+  function drawFlippers() {
+    const list = [leftFlipper, rightFlipper];
+    for (const f of list) {
+      const tx = f.x + Math.cos(f.angle) * f.len, ty = f.y + Math.sin(f.angle) * f.len;
+      ctx.save(); ctx.lineCap = 'round';
+      ctx.shadowColor = '#ff8c42'; ctx.shadowBlur = 14; ctx.strokeStyle = '#c74f10'; ctx.lineWidth = f.r * 2;
+      ctx.beginPath(); ctx.moveTo(f.x, f.y); ctx.lineTo(tx, ty); ctx.stroke();
+
+      ctx.shadowBlur = 0;
+      const g = ctx.createLinearGradient(f.x, f.y, tx, ty);
+      g.addColorStop(0, '#ffb066'); g.addColorStop(1, '#ff6a00');
+      ctx.strokeStyle = g; ctx.lineWidth = f.r * 1.15;
+      ctx.beginPath(); ctx.moveTo(f.x, f.y); ctx.lineTo(tx, ty); ctx.stroke();
+      ctx.restore();
+
+      ctx.fillStyle = '#3a2a1a'; ctx.beginPath(); ctx.arc(f.x, f.y, 4.5, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#ffcf9a'; ctx.beginPath(); ctx.arc(f.x, f.y, 2, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  function drawBall() {
+    for (let i = 0; i < ball.trail.length; i++) {
+      const t = ball.trail[i], a = (i / ball.trail.length) * 0.28;
+      ctx.fillStyle = 'rgba(140, 200, 255, ' + a + ')';
+      ctx.beginPath(); ctx.arc(t.x, t.y, BALL_R * (0.35 + 0.6 * (i / ball.trail.length)), 0, Math.PI * 2); ctx.fill();
+    }
+
+    ctx.save(); ctx.shadowColor = '#aaccff'; ctx.shadowBlur = 16;
+    const g = ctx.createRadialGradient(ball.x - 3.5, ball.y - 4, 0.5, ball.x, ball.y, BALL_R);
+    g.addColorStop(0, '#ffffff'); g.addColorStop(0.45, '#d6dcf0');
+    g.addColorStop(0.8, '#8c94bc'); g.addColorStop(1, '#4a5080');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.beginPath(); ctx.arc(ball.x - 3, ball.y - 3.5, 2.2, 0, Math.PI * 2); ctx.fill();
+  }
+
+  function drawTrajectory() {
+    if (!trajectoryEnabled || trajectoryPoints.length < 2) return;
+    const n = trajectoryPoints.length;
+    const CHUNKS = 24;
+    ctx.save();
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.shadowColor = '#00e5ff';
+    ctx.shadowBlur = 10;
+
+    for (let c = 0; c < CHUNKS; c++) {
+      const start = Math.floor(c * (n - 1) / CHUNKS);
+      const end = Math.floor((c + 1) * (n - 1) / CHUNKS);
+      if (end <= start) continue;
+      const alpha = (1 - c / CHUNKS) * 0.75;
+      ctx.strokeStyle = 'rgba(0, 229, 255, ' + alpha + ')';
+      ctx.beginPath();
+      ctx.moveTo(trajectoryPoints[start].x, trajectoryPoints[start].y);
+      for (let i = start + 1; i <= end; i++) {
+        ctx.lineTo(trajectoryPoints[i].x, trajectoryPoints[i].y);
+      }
+      ctx.stroke();
+    }
+
+    const endP = trajectoryPoints[n - 1];
+    ctx.shadowBlur = 16;
+    ctx.fillStyle = 'rgba(0, 229, 255, 0.9)';
+    ctx.beginPath(); ctx.arc(endP.x, endP.y, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  function drawLauncherGlow() {
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 600);
+    ctx.save(); ctx.shadowColor = '#4be1ff'; ctx.shadowBlur = 10 + pulse * 10;
+    ctx.fillStyle = 'rgba(75, 225, 255, ' + (0.18 + pulse * 0.25) + ')';
+    ctx.fillRect(392, 694, 24, 4); ctx.restore();
+  }
+
+  function drawTrajectoryIndicator() {
+    if (!trajectoryEnabled) return;
+    const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 300);
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.shadowColor = '#00e5ff';
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = 'rgba(0, 229, 255, ' + (0.5 + pulse * 0.4) + ')';
+    ctx.font = 'bold 12px -apple-system, "PingFang SC", sans-serif';
+    ctx.fillText('轨迹预测：开启', W / 2, 92);
+    ctx.restore();
+  }
+
+  function drawOverlay() {
+    ctx.save(); ctx.textAlign = 'center';
+    if (gameOver) {
+      ctx.fillStyle = 'rgba(5, 5, 15, 0.78)'; ctx.fillRect(0, 0, W, H);
+      ctx.shadowColor = '#ff2d6f'; ctx.shadowBlur = 24; ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 42px -apple-system, "PingFang SC", sans-serif'; ctx.fillText('游戏结束', W / 2, H / 2 - 50);
+
+      ctx.shadowBlur = 14; ctx.fillStyle = '#8a8ac0'; ctx.font = 'bold 15px -apple-system, "PingFang SC", sans-serif';
+      ctx.fillText('最终分数', W / 2, H / 2 + 14);
+
+      ctx.shadowColor = '#7a7aff'; ctx.shadowBlur = 20; ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 56px "Courier New", monospace'; ctx.fillText(String(Math.floor(displayScore)), W / 2, H / 2 + 72);
+
+      ctx.shadowColor = '#ffd166'; ctx.shadowBlur = 16; ctx.fillStyle = '#ffd166';
+      ctx.font = 'bold 16px -apple-system, "PingFang SC", sans-serif';
+      ctx.fillText('最高分 ' + Math.floor(highScore), W / 2, H / 2 + 108);
+
+      const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 380);
+      ctx.shadowBlur = 12; ctx.fillStyle = 'rgba(120, 200, 255, ' + pulse + ')';
+      ctx.font = 'bold 16px -apple-system, "PingFang SC", sans-serif'; ctx.fillText('点击屏幕 / 按空格 重新开始', W / 2, H / 2 + 150);
+    } else if (ball.stuck) {
+      const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 350);
+      ctx.shadowColor = '#4be1ff'; ctx.shadowBlur = 18;
+      ctx.fillStyle = 'rgba(180, 235, 255, ' + (0.5 + pulse * 0.5) + ')';
+      ctx.font = 'bold 17px -apple-system, "PingFang SC", sans-serif'; ctx.fillText('按 空格 / 点击屏幕 发射', W / 2, H - 30);
+    }
+    ctx.restore();
+  }
+
+  function render() {
+    ctx.save();
+    if (shake > 0.2) {
+      ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+      shake *= 0.85;
+    } else shake = 0;
+
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, '#0e0e20'); bg.addColorStop(0.5, '#0a0a18'); bg.addColorStop(1, '#06060e');
+    ctx.fillStyle = bg; ctx.fillRect(-20, -20, W + 40, H + 40);
+
+    ctx.strokeStyle = 'rgba(90, 90, 200, 0.06)'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 40) { ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+    for (let y = 0; y <= H; y += 40) { ctx.moveTo(0, y); ctx.lineTo(W, y); }
+    ctx.stroke();
+
+    drawWalls();
+    drawPegs();
+    drawLauncherGlow();
+    drawTrajectory();
+    drawBumpers();
+    drawFlippers();
+    drawBall();
+    drawTrajectoryIndicator();
+
+    if (flashScreen > 0.01) {
+      ctx.fillStyle = 'rgba(255, 60, 120, ' + flashScreen * 0.25 + ')';
+      ctx.fillRect(0, 0, W, H); flashScreen *= 0.88;
+    }
+    drawOverlay(); ctx.restore();
+  }
+
+  // ============ 主循环 ============
+  let lastTime = 0, acc = 0;
+  function loop(t) {
+    if (!lastTime) lastTime = t;
+    let dt = (t - lastTime) / 1000; lastTime = t;
+    if (dt > 0.1) dt = 0.1;
+
+    acc += dt;
+    let iter = 0;
+    while (acc >= DT && iter < 40) { physics(DT); acc -= DT; iter++; }
+    if (iter >= 40) acc = 0;
+
+    if (!gameOver && displayScore < score) {
+      displayScore += Math.max(1, (score - displayScore) * 0.18);
+      if (score - displayScore < 1) displayScore = score;
+      updateHUD();
+    }
+
+    if (!ball.stuck && !gameOver) {
+      ball.trail.push({ x: ball.x, y: ball.y });
+      if (ball.trail.length > 16) ball.trail.shift();
+    }
+
+    if (trajectoryEnabled && !ball.stuck && !gameOver) {
+      trajectoryFrameCounter++;
+      if (trajectoryFrameCounter >= TRAJECTORY_UPDATE_INTERVAL) {
+        trajectoryFrameCounter = 0;
+        trajectoryPoints = computeTrajectory();
+      }
+    } else {
+      trajectoryFrameCounter = 0;
+      if (!trajectoryEnabled) trajectoryPoints = [];
+    }
+
+    render(); requestAnimationFrame(loop);
+  }
+
+  // ============ 输入 ============
+  function getCanvasPos(e) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) / rect.width * W,
+      y: (e.clientY - rect.top) / rect.height * H
+    };
+  }
+
+  function checkBallClick(x, y) {
+    const names = ['left', 'right', 'bottom'];
+    for (let i = 0; i < bumpers.length; i++) {
+      const b = bumpers[i];
+      const dx = x - b.x, dy = y - b.y;
+      const r = b.r + 10;
+      if (dx * dx + dy * dy < r * r) return names[i];
+    }
+    return null;
+  }
+
+  function handleBallClick(name) {
+    const idx = name === 'left' ? 0 : name === 'right' ? 1 : 2;
+    bumpers[idx].flash = 1;
+
+    clickSequence.push(name);
+    if (clickSequence.length > 4) clickSequence.shift();
+
+    if (clickSequence.length === 4 &&
+        clickSequence[0] === 'left' && clickSequence[1] === 'left' &&
+        clickSequence[2] === 'right' && clickSequence[3] === 'bottom') {
+      trajectoryEnabled = !trajectoryEnabled;
+      clickSequence = [];
+      trajectoryPoints = [];
+      trajectoryFrameCounter = 0;
+      if (trajectoryEnabled && !ball.stuck && !gameOver) {
+        trajectoryPoints = computeTrajectory();
+      }
+    }
+  }
+
+  const keys = {};
+  window.addEventListener('keydown', (e) => {
+    const k = e.key.toLowerCase();
+    if ([' ', 'arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(k)) e.preventDefault();
+    if (keys[k]) return; keys[k] = true;
+    if (k === 'arrowleft' || k === 'a') leftFlipper.pressed = true;
+    if (k === 'arrowright' || k === 'd') rightFlipper.pressed = true;
+    if (k === ' ' || k === 'arrowup' || k === 'w') { if (gameOver) newGame(); else launch(); }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    const k = e.key.toLowerCase(); keys[k] = false;
+    if (k === 'arrowleft' || k === 'a') leftFlipper.pressed = false;
+    if (k === 'arrowright' || k === 'd') rightFlipper.pressed = false;
+  });
+
+  const pointers = new Map();
+  function refreshPointerFlippers() {
+    let l = false, r = false;
+    for (const side of pointers.values()) {
+      if (side === 'left') l = true; if (side === 'right') r = true;
+    }
+    leftFlipper.pressed = l; rightFlipper.pressed = r;
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+
+    if (gameOver) { newGame(); return; }
+
+    const pos = getCanvasPos(e);
+    const hitBall = checkBallClick(pos.x, pos.y);
+    if (hitBall) {
+      handleBallClick(hitBall);
+      return;
+    }
+
+    if (ball.stuck) { launch(); return; }
+
+    const side = pos.x < W / 2 ? 'left' : 'right';
+    pointers.set(e.pointerId, side);
+    refreshPointerFlippers();
+  });
+
+  function endPointer(e) { pointers.delete(e.pointerId); refreshPointerFlippers(); }
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+  canvas.addEventListener('pointerleave', endPointer);
+  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+  // ============ 启动 ============
+  resize();
+  newGame();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
